@@ -11,6 +11,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ProjectionHeads(nn.Module):
@@ -31,13 +32,15 @@ class ProjectionHeads(nn.Module):
 
     def __init__(self, d_image: int, d_text: int, d_proj: int = 256) -> None:
         super().__init__()
-        # TODO: define self.image_proj, self.text_proj as nn.Linear(..., bias=False).
-        raise NotImplementedError
+        self.image_proj = nn.Linear(d_image, d_proj, bias=False)
+        self.text_proj = nn.Linear(d_text, d_proj, bias=False)
 
     def forward(
         self, image_embeds: torch.Tensor, text_embeds: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+        image_out = F.normalize(self.image_proj(image_embeds), dim=-1)
+        text_out = F.normalize(self.text_proj(text_embeds), dim=-1)
+        return image_out, text_out
 
 
 def init_logit_scale() -> nn.Parameter:
@@ -58,6 +61,11 @@ def clip_loss(
         S = image_embeds @ text_embeds.T * exp(logit_scale)
         y = arange(B).
 
+    The loss is symmetric because each image must identify its paired text (row
+    direction) and each text must identify its paired image (column direction);
+    averaging both directions makes the model equally accountable to both
+    modalities.
+
     `logit_scale` should be clamped to a maximum of ln(100) to prevent runaway
     growth (do this OUTSIDE this function, e.g. in your training loop, with
     `logit_scale.data.clamp_(max=math.log(100.0))`).
@@ -70,5 +78,11 @@ def clip_loss(
     Returns:
         Scalar loss tensor.
     """
-    # TODO: implement.
-    raise NotImplementedError
+    scale = logit_scale.exp()
+    # Similarity matrix: (B, B)
+    logits = image_embeds @ text_embeds.T * scale
+    B = image_embeds.shape[0]
+    labels = torch.arange(B, device=image_embeds.device)
+    loss_i2t = F.cross_entropy(logits, labels)
+    loss_t2i = F.cross_entropy(logits.T, labels)
+    return 0.5 * (loss_i2t + loss_t2i)

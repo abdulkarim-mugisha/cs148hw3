@@ -37,21 +37,33 @@ class RoPE1D(nn.Module):
         self.max_seq_len = max_seq_len
         self.base = base
 
-        # TODO: precompute cos and sin tables of shape (max_seq_len, head_dim // 2)
-        # and register them as non-persistent buffers.
-        # Hint:
-        #   inv_freq = base ** (-torch.arange(0, head_dim, 2).float() / head_dim)
-        #   t = torch.arange(max_seq_len).float()
-        #   freqs = torch.outer(t, inv_freq)              # (max_seq_len, head_dim // 2)
-        #   self.register_buffer("cos_cached", freqs.cos(), persistent=False)
-        #   self.register_buffer("sin_cached", freqs.sin(), persistent=False)
-        raise NotImplementedError
+        inv_freq = base ** (-torch.arange(0, head_dim, 2).float() / head_dim)
+        t = torch.arange(max_seq_len).float()
+        freqs = torch.outer(t, inv_freq)  # (max_seq_len, head_dim // 2)
+        self.register_buffer("cos_cached", freqs.cos(), persistent=False)
+        self.register_buffer("sin_cached", freqs.sin(), persistent=False)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # TODO: implement.
-        # Hint: split x into even and odd indices along head_dim, look up
-        # cos/sin for the given positions, and apply the 2D rotation.
-        raise NotImplementedError
+        # x: (B, num_heads, T, head_dim)
+        # positions: (T,)
+        cos = self.cos_cached[positions]  # (T, head_dim // 2)
+        sin = self.sin_cached[positions]  # (T, head_dim // 2)
+        # Reshape for broadcast: (1, 1, T, head_dim // 2)
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+        # Split into even and odd dimensions
+        x_even = x[..., 0::2]  # (B, num_heads, T, head_dim // 2)
+        x_odd = x[..., 1::2]
+
+        # Apply 2D rotation
+        x_rotated_even = x_even * cos - x_odd * sin
+        x_rotated_odd = x_even * sin + x_odd * cos
+
+        # Interleave back
+        x_out = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
+        x_out = x_out.flatten(-2)  # (B, num_heads, T, head_dim)
+        return x_out
 
 
 class RoPE2D(nn.Module):
@@ -81,9 +93,34 @@ class RoPE2D(nn.Module):
         self.grid_size = grid_size
         self.base = base
 
-        # TODO: precompute (cos, sin) for x and y separately, each of shape
-        # (grid_size, head_dim // 4). Register as buffers.
-        raise NotImplementedError
+        half_dim = head_dim // 2
+        inv_freq = base ** (-torch.arange(0, half_dim, 2).float() / half_dim)
+        t = torch.arange(grid_size).float()
+        freqs = torch.outer(t, inv_freq)  # (grid_size, head_dim // 4)
+        self.register_buffer("cos_cached", freqs.cos(), persistent=False)
+        self.register_buffer("sin_cached", freqs.sin(), persistent=False)
+
+    def _apply_rope_half(
+        self,
+        x_half: torch.Tensor,
+        coords: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply 1D RoPE to a half of the head dimension.
+
+        x_half: (B, num_heads, T, head_dim // 2)
+        coords: (T,)
+        """
+        cos = self.cos_cached[coords].unsqueeze(0).unsqueeze(0)  # (1, 1, T, head_dim // 4)
+        sin = self.sin_cached[coords].unsqueeze(0).unsqueeze(0)
+
+        x_even = x_half[..., 0::2]
+        x_odd = x_half[..., 1::2]
+
+        x_rotated_even = x_even * cos - x_odd * sin
+        x_rotated_odd = x_even * sin + x_odd * cos
+
+        x_out = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
+        return x_out.flatten(-2)
 
     def forward(
         self,
@@ -91,7 +128,11 @@ class RoPE2D(nn.Module):
         x_coords: torch.Tensor,
         y_coords: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: split x along head_dim into two halves; apply 1D RoPE to the
-        # first half with x_coords and to the second half with y_coords;
-        # concatenate.
-        raise NotImplementedError
+        half = self.head_dim // 2
+        x_first = x[..., :half]   # Use x-coordinate for first half
+        x_second = x[..., half:]  # Use y-coordinate for second half
+
+        x_first = self._apply_rope_half(x_first, x_coords)
+        x_second = self._apply_rope_half(x_second, y_coords)
+
+        return torch.cat([x_first, x_second], dim=-1)

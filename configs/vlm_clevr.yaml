@@ -19,7 +19,7 @@ train:
   num_steps: 2000
   batch_size: 32
   gradient_accumulation_steps: 4
-  num_workers: 4
+  num_workers: 0
   log_every: 25
   eval_every_steps: 200
   eval_max_examples: 500
